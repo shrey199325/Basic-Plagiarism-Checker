@@ -16,13 +16,15 @@ import bcrypt
 from pymongo import MongoClient
 import spacy
 
-
 app = Flask(__name__)
 api = Api(app)
 
 client = MongoClient("mongodb://db:27017")
 db = client.SimilarityDatabase
 users = db["Users"]
+ADMIN_USER = "admin"
+HASSHED_ADMIN_PASS = b'$2b$12$tpvo4zJQgkoBeAoaZ/1rc.8b83qU4l/BmDcMQIKe4ryVTErUYlaha'
+# admin
 
 ### Status Codes###
 OK = 200
@@ -31,6 +33,44 @@ INVALID_USER_INFO = 302
 USER_ALREADY_EXISTS = 303
 INVALID_ADMIN_USERNAME_PASSWORD = 305
 ####
+
+
+def generate_admin_user():
+    try:
+        _ = users.find({"Username": ADMIN_USER})[0]
+    except IndexError:
+        users.insert({
+            "Username": ADMIN_USER,
+            "Password": HASSHED_ADMIN_PASS,
+            "admin": True,
+            "Tokens": 10
+        })
+
+
+generate_admin_user()
+
+
+def verify_pass(username, password, check_pass=True, admin=False):
+    try:
+        user = users.find({
+            "Username": username
+        })[0]
+        hashedPASS = user["Password"]
+        is_admin = user["admin"]
+    except IndexError:
+        return False
+    if check_pass:
+        return bcrypt.hashpw(password.encode("utf8"),
+                             hashedPASS) == hashedPASS and is_admin == admin
+    else:
+        return True
+
+
+def count_token(username):
+    token = users.find({
+        "Username": username
+    })[0]["Tokens"]
+    return int(token)
 
 
 class Register(Resource):
@@ -48,30 +88,13 @@ class Register(Resource):
         users.insert({
             "Username": username,
             "Password": hashed_pw,
+            "admin": False,
             "Tokens": 10
         })
         ret_json = {
             "status": OK, "msg": "Successfully signed in"
         }
         return jsonify(ret_json)
-
-
-def verify_pass(username, password):
-    try:
-        hashedPASS = users.find({
-            "Username": username
-        })[0]["Password"]
-    except IndexError:
-        return False
-    return bcrypt.hashpw(password.encode("utf8"),
-                         hashedPASS) == hashedPASS
-
-
-def count_token(username):
-    token = users.find({
-        "Username": username
-    })[0]["Tokens"]
-    return int(token)
 
 
 class Detect(Resource):
@@ -100,7 +123,7 @@ class Detect(Resource):
 
         ret_json = {
             "status": OK,
-            "similarity": ratio,
+            "similarity percentage": ratio * 100,
             "msg": "Similarity score calculated successfully"
         }
 
@@ -116,20 +139,30 @@ class Refill(Resource):
     def post(self):
         postedData = request.get_json()
         username = postedData["username"]
-        password = postedData["admin_pw"]
+        password = postedData["password"]
+        refill_user = postedData["refill_user"]
         refill_amt = postedData["refill"]
-        correct_pass = verify_pass(username, password)
-        if not correct_pass:
+        correct_admin_pass = verify_pass(username, password, admin=True)
+        # Only admin user can have the access to increase the Tokens
+        if not correct_admin_pass:
             ret_json = {
-                "status": INVALID_ADMIN_USERNAME_PASSWORD
+                "status": INVALID_ADMIN_USERNAME_PASSWORD,
+                "msg": "Invalid Admin Username and Password"
             }
-            return ret_json
-        total_token = count_token(username)
+            return jsonify(ret_json)
+        user_exists = verify_pass(refill_user, None, False)
+        if not user_exists:
+            ret_json = {
+                "status": INVALID_USER_INFO,
+                "msg": "Refill Username doesn't exists!!!"
+            }
+            return jsonify(ret_json)
+        total_token = count_token(refill_user)
         users.update({
-            "Username": username
+            "Username": refill_user
         }, {
             "$set": {
-                "Tokens": total_token - int(refill_amt)
+                "Tokens": total_token + int(refill_amt)
             }
         })
         ret_json = {"status": OK, "msg": "Refill successful"}
@@ -139,7 +172,6 @@ class Refill(Resource):
 api.add_resource(Register, "/register")
 api.add_resource(Detect, "/detect")
 api.add_resource(Refill, "/refill")
-
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0')
